@@ -1,6 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithCustomToken,
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut
+} from 'firebase/auth';
 import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 
 function App() {
@@ -18,6 +26,7 @@ function App() {
   const [newTaskText, setNewTaskText] = useState('');
   const [newTaskArea, setNewTaskArea] = useState(''); // Bereich für Aufgaben
   const [newTaskPriority, setNewTaskPriority] = useState('medium'); // Priorität für Aufgaben
+  const [newTaskDueDate, setNewTaskDueDate] = useState(''); // Fälligkeitsdatum für Aufgaben
 
   // Zustand für Notizen
   const [notes, setNotes] = useState([]);
@@ -44,13 +53,17 @@ function App() {
   // Zustand für Ereignisse (Events)
   const [events, setEvents] = useState([]);
   const [newEventTitle, setNewEventTitle] = useState('');
-  const [newEventDate, setNewEventDate] = useState(new Date().toISOString().split('T')[0]); // YYYY-MM-DD
+  const [newEventDate, setNewEventDate] = useState(new Date().toISOString().split('T')[0]); //YYYY-MM-DD
   const [newEventStartTime, setNewEventStartTime] = useState('09:00');
   const [newEventEndTime, setNewEventEndTime] = useState('10:00');
   const [newEventArea, setNewEventArea] = useState('');
 
-  // Schulzeiten des Benutzers (entfernt, da der Benutzer sie entfernen wollte)
-  // const schoolSchedule = { ... };
+  // Zustand für Authentifizierung
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoginMode, setIsLoginMode] = useState(true); // true for login, false for register
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Firebase-Initialisierung und Authentifizierung
   useEffect(() => {
@@ -74,15 +87,13 @@ function App() {
       const unsubscribeAuth = onAuthStateChanged(firebaseAuth, async (user) => {
         if (user) {
           setUserId(user.uid);
-          setIsAuthReady(true);
         } else {
-          // Wenn kein Benutzer angemeldet ist, versuchen Sie die Anmeldung
+          // If no user is logged in, try to sign in anonymously
           if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
             try {
               await signInWithCustomToken(firebaseAuth, __initial_auth_token);
             } catch (error) {
               console.error("Fehler bei der Anmeldung mit benutzerdefiniertem Token:", error);
-              // Wenn benutzerdefiniertes Token fehlschlägt, anonym anmelden
               try {
                 await signInAnonymously(firebaseAuth);
               } catch (anonError) {
@@ -90,15 +101,14 @@ function App() {
               }
             }
           } else {
-            // Wenn kein Token vorhanden ist, anonym anmelden
             try {
               await signInAnonymously(firebaseAuth);
             } catch (anonError) {
               console.error("Fehler bei der anonymen Anmeldung:", anonError);
             }
           }
-          setIsAuthReady(true); // Auch wenn die Anmeldung fehlschlägt, ist der Auth-Prozess abgeschlossen
         }
+        setIsAuthReady(true); // Auth process is complete
       });
 
       // Cleanup-Funktion für den Auth-Listener
@@ -112,22 +122,22 @@ function App() {
   useEffect(() => {
     if (db && userId && isAuthReady) {
       const tasksCollectionRef = collection(db, `artifacts/${__app_id}/users/${userId}/tasks`);
-      const q = query(tasksCollectionRef); // Keine orderBy, um Indexfehler zu vermeiden
+      const q = query(tasksCollectionRef);
 
       const unsubscribeTasks = onSnapshot(q, (snapshot) => {
         const fetchedTasks = snapshot.docs.map(doc => ({
           id: doc.id,
-          ...doc.data()
+          ...doc.data(),
+          dueDate: doc.data().dueDate ? doc.data().dueDate.toDate() : null // Convert Firestore Timestamp to Date object
         })).sort((a, b) => {
-          // Sortierung nach Priorität (high > medium > low) und dann nach Erstellungsdatum
           const priorityOrder = { 'high': 3, 'medium': 2, 'low': 1, '': 0, undefined: 0 };
           const priorityA = priorityOrder[a.priority] || 0;
           const priorityB = priorityOrder[b.priority] || 0;
 
           if (priorityA !== priorityB) {
-            return priorityB - priorityA; // Höhere Priorität zuerst
+            return priorityB - priorityA;
           }
-          return (a.createdAt?.toDate() || 0) - (b.createdAt?.toDate() || 0); // Dann nach Erstellungsdatum
+          return (a.createdAt?.toDate() || 0) - (b.createdAt?.toDate() || 0);
         });
         setTasks(fetchedTasks);
       }, (error) => {
@@ -142,13 +152,13 @@ function App() {
   useEffect(() => {
     if (db && userId && isAuthReady) {
       const notesCollectionRef = collection(db, `artifacts/${__app_id}/users/${userId}/notes`);
-      const q = query(notesCollectionRef); // Keine orderBy, um Indexfehler zu vermeiden
+      const q = query(notesCollectionRef);
 
       const unsubscribeNotes = onSnapshot(q, (snapshot) => {
         const fetchedNotes = snapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
-        })).sort((a, b) => (a.createdAt?.toDate() || 0) - (b.createdAt?.toDate() || 0)); // Client-seitige Sortierung
+        })).sort((a, b) => (a.createdAt?.toDate() || 0) - (b.createdAt?.toDate() || 0));
         setNotes(fetchedNotes);
       }, (error) => {
         console.error("Fehler beim Abrufen von Notizen:", error);
@@ -171,7 +181,6 @@ function App() {
           let startDate = null;
           let endDate = null;
 
-          // Firestore Timestamps in Date-Objekte umwandeln und Validierung hinzufügen
           if (startTimestamp && typeof startTimestamp.toDate === 'function') {
             const tempDate = startTimestamp.toDate();
             if (tempDate instanceof Date && !isNaN(tempDate)) {
@@ -191,8 +200,8 @@ function App() {
             start: startDate,
             end: endDate,
           };
-        }).filter(event => event.start && event.end) // Nur Ereignisse mit gültigen Start- und Endzeiten behalten
-          .sort((a, b) => (a.start || 0) - (b.start || 0)); // Nach Startzeit sortieren
+        }).filter(event => event.start && event.end)
+          .sort((a, b) => a.start - b.start);
         setEvents(fetchedEvents);
       }, (error) => {
         console.error("Fehler beim Abrufen von Ereignissen:", error);
@@ -202,20 +211,86 @@ function App() {
     }
   }, [db, userId, isAuthReady]);
 
+  // Authentifizierungsfunktionen
+  const handleAuthAction = async () => {
+    setAuthError('');
+    setAuthLoading(true);
+    if (!auth) {
+      setAuthError("Firebase Auth ist nicht initialisiert.");
+      setAuthLoading(false);
+      return;
+    }
+
+    try {
+      if (isLoginMode) {
+        await signInWithEmailAndPassword(auth, email, password);
+        setAiMessage('Erfolgreich angemeldet!');
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+        setAiMessage('Erfolgreich registriert und angemeldet!');
+      }
+    } catch (error) {
+      console.error("Authentifizierungsfehler:", error);
+      let errorMessage = "Ein unbekannter Fehler ist aufgetreten.";
+      switch (error.code) {
+        case 'auth/invalid-email':
+          errorMessage = 'Ungültige E-Mail-Adresse.';
+          break;
+        case 'auth/user-disabled':
+          errorMessage = 'Dieser Benutzer wurde deaktiviert.';
+          break;
+        case 'auth/user-not-found':
+          errorMessage = 'Kein Benutzer mit dieser E-Mail gefunden.';
+          break;
+        case 'auth/wrong-password':
+          errorMessage = 'Falsches Passwort.';
+          break;
+        case 'auth/email-already-in-use':
+          errorMessage = 'Diese E-Mail-Adresse wird bereits verwendet.';
+          break;
+        case 'auth/weak-password':
+          errorMessage = 'Das Passwort ist zu schwach (mindestens 6 Zeichen).';
+          break;
+        default:
+          errorMessage = `Fehler: ${error.message}`;
+      }
+      setAuthError(errorMessage);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (auth) {
+      try {
+        await signOut(auth);
+        setUserId(null); // Clear userId on logout
+        setAiMessage('Erfolgreich abgemeldet.');
+        setCurrentView('dashboard'); // Go back to dashboard/login screen
+      } catch (error) {
+        console.error("Fehler beim Abmelden:", error);
+        setAiMessage('Fehler beim Abmelden.');
+      }
+    }
+  };
+
+
   // Funktionen für Aufgaben
-  const addTask = async (text, area, priority = 'medium') => { // Priorität als Parameter
+  const addTask = async (text, area, priority = 'medium', dueDate = null) => {
     if (text.trim() === '' || !db || !userId) return;
     try {
       await addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/tasks`), {
         text: text,
         completed: false,
         area: area || '',
-        priority: priority, // Priorität speichern
+        priority: priority,
         createdAt: serverTimestamp(),
+        dueDate: dueDate ? new Date(dueDate) : null, // Save dueDate as Date object or null
       });
       setNewTaskText('');
       setNewTaskArea('');
       setNewTaskPriority('medium');
+      setNewTaskDueDate(''); // Clear due date
       setAiMessage('Aufgabe erfolgreich hinzugefügt!');
     } catch (e) {
       console.error("Fehler beim Hinzufügen der Aufgabe:", e);
@@ -338,7 +413,10 @@ function App() {
 
   // Funktion für die Schnellerfassung
   const handleQuickAdd = async () => {
-    if (quickAddText.trim() === '') return;
+    if (quickAddText.trim() === '' || !userId) {
+      setAiMessage('Bitte melde dich an, um diese Funktion zu nutzen.');
+      return;
+    }
 
     const lowerCaseText = quickAddText.toLowerCase();
     const areaToUse = quickAddArea.trim();
@@ -348,8 +426,8 @@ function App() {
       const title = content.split(' ').slice(0, 3).join(' ') || 'Neue Notiz';
       await addNote(title, content, areaToUse);
     } else {
-      // Standardmäßig als Aufgabe hinzufügen mit Standardpriorität
-      await addTask(quickAddText, areaToUse, 'medium');
+      // If quick add is a task, no due date is set by default
+      await addTask(quickAddText, areaToUse, 'medium', null);
     }
     setQuickAddText('');
     setQuickAddArea('');
@@ -357,8 +435,8 @@ function App() {
 
   // Funktion für den KI-Assistenten
   const handleAICommand = async () => {
-    if (aiCommandText.trim() === '') {
-      setAiMessage('Bitte gib einen Befehl für den KI-Assistenten ein.');
+    if (aiCommandText.trim() === '' || !userId) {
+      setAiMessage('Bitte melde dich an, um den KI-Assistenten zu nutzen.');
       return;
     }
 
@@ -372,7 +450,7 @@ function App() {
       Deine Aufgabe ist es, diese Anweisung in eine strukturierte JSON-Antwort umzuwandeln, die die App verwenden kann.
 
       Verfügbare Aktionen:
-      - "addTask": Fügt eine neue Aufgabe hinzu. Benötigt 'text' (String) und optional 'area' (String) und 'priority' (String: "low", "medium", "high").
+      - "addTask": Fügt eine neue Aufgabe hinzu. Benötigt 'text' (String) und optional 'area' (String), 'priority' (String: "low", "medium", "high") und 'dueDate' (String im Format YYYY-MM-DD oder null).
       - "addNote": Fügt eine neue Notiz hinzu. Benötigt 'title' (String), 'content' (String) und optional 'area' (String).
       - "none": Keine spezifische Aktion erforderlich, aber du kannst eine 'message' zurückgeben.
 
@@ -382,6 +460,7 @@ function App() {
         "data": {
           "text"?: string, // Nur für addTask
           "priority"?: "low" | "medium" | "high", // Neu für addTask, Standard ist "medium" wenn nicht anders angegeben
+          "dueDate"?: string | null, // Neu für addTask, im Format YYYY-MM-DD
           "title"?: string, // Nur für addNote
           "content"?: string, // Nur für addNote
           "area"?: string // Optional für beide
@@ -397,7 +476,8 @@ function App() {
         "data": {
           "text": "Müll rausbringen",
           "area": "Haushalt",
-          "priority": "medium"
+          "priority": "medium",
+          "dueDate": "${new Date(Date.now() + 86400000).toISOString().split('T')[0]}" // Beispiel für morgen
         },
         "message": "Aufgabe 'Müll rausbringen' hinzugefügt."
       }
@@ -421,7 +501,8 @@ function App() {
         "data": {
           "text": "Projekt bis Freitag abschließen",
           "priority": "high",
-          "area": "Arbeit"
+          "area": "Arbeit",
+          "dueDate": "2025-07-11" // Beispiel für Freitag
         },
         "message": "Aufgabe 'Projekt bis Freitag abschließen' mit hoher Priorität hinzugefügt."
       }
@@ -434,7 +515,7 @@ function App() {
         "message": "Ich bin darauf spezialisiert, Ihnen bei der Organisation zu helfen. Ich kann diese Frage nicht beantworten."
       }
 
-      Verstehe die Absicht des Benutzers und fülle die Felder entsprechend aus. Wenn ein Bereich nicht explizit genannt wird, lass 'area' leer. Wenn der Titel einer Notiz nicht klar ist, nimm die ersten paar Wörter des Inhalts. Wenn die Priorität einer Aufgabe nicht explizit genannt wird, setze sie auf "medium".
+      Verstehe die Absicht des Benutzers und fülle die Felder entsprechend aus. Wenn ein Bereich nicht explizit genannt wird, lass 'area' leer. Wenn der Titel einer Notiz nicht klar ist, nimm die ersten paar Wörter des Inhalts. Wenn die Priorität einer Aufgabe nicht explizit genannt wird, setze sie auf "medium". Wenn kein Fälligkeitsdatum genannt wird, setze 'dueDate' auf null.
 
       Benutzerbefehl: "${aiCommandText}"
       `;
@@ -456,6 +537,7 @@ function App() {
                 properties: {
                   text: { type: "STRING" },
                   priority: { type: "STRING", enum: ["low", "medium", "high"] },
+                  dueDate: { type: "STRING", nullable: true }, // Add dueDate to schema
                   title: { type: "STRING" },
                   content: { type: "STRING" },
                   area: { type: "STRING" }
@@ -489,7 +571,7 @@ function App() {
         switch (action) {
           case 'addTask':
             if (data.text) {
-              await addTask(data.text, data.area, data.priority || 'medium'); // Priorität übergeben
+              await addTask(data.text, data.area, data.priority || 'medium', data.dueDate); // Pass dueDate
               setAiMessage(message || 'Aufgabe durch KI hinzugefügt.');
             } else {
               setAiMessage('KI konnte keine gültige Aufgabe extrahieren. Bitte versuche es genauer.');
@@ -534,7 +616,7 @@ function App() {
 
   // Hilfsfunktion für Event-Farbe
   const getEventColor = (index) => {
-    const colors = ['bg-purple-600', 'bg-teal-600', 'bg-orange-600', 'bg-pink-600', 'bg-indigo-600', 'bg-lime-600']; // More colors
+    const colors = ['bg-purple-600', 'bg-teal-600', 'bg-orange-600', 'bg-pink-600', 'bg-indigo-600', 'bg-lime-600', 'bg-cyan-600', 'bg-fuchsia-600']; // More distinct colors
     return colors[index % colors.length];
   };
 
@@ -556,10 +638,38 @@ function App() {
     }).sort((a, b) => a.start - b.start);
   };
 
+  const getTasksForDate = (date) => {
+    return tasks.filter(task => {
+      if (task.completed || !task.dueDate || !(task.dueDate instanceof Date) || isNaN(task.dueDate.getTime())) {
+        return false;
+      }
+      const taskDueDate = new Date(task.dueDate);
+      return taskDueDate.getDate() === date.getDate() &&
+             taskDueDate.getMonth() === date.getMonth() &&
+             taskDueDate.getFullYear() === date.getFullYear();
+    }).sort((a, b) => (a.createdAt?.toDate() || 0) - (b.createdAt?.toDate() || 0));
+  };
+
+  const createGoogleCalendarLink = (event) => {
+    if (!event || !event.title || !event.start || !event.end) return '#';
+
+    const formatDate = (date) => {
+      return date.toISOString().replace(/[-:]|\.\d{3}/g, ''); //YYYYMMDDTHHMMSSZ
+    };
+
+    const title = encodeURIComponent(event.title);
+    const dates = `${formatDate(event.start)}/${formatDate(event.end)}`;
+    const details = event.area ? encodeURIComponent(`Bereich: ${event.area}`) : '';
+    const location = ''; // No location in current schema
+
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${dates}&details=${details}&location=${location}&sf=true&output=xml`;
+  };
+
+
   // Render-Funktionen für die verschiedenen Ansichten (vor dem Haupt-Return definiert)
   const renderMonthView = () => {
     const daysInMonth = getDaysInMonth(currentMonth, currentYear);
-    const firstDay = getFirstDayOfMonth(currentMonth, currentYear); // 0 = So, 1 = Mo ...
+    const firstDay = getFirstDayOfMonth(currentMonth, currentYear); // 0 for Sunday, 1 for Monday
     const startingDay = (firstDay === 0) ? 6 : firstDay - 1; // Adjust to start week on Monday (0 for Monday)
 
     const blanks = [];
@@ -575,6 +685,7 @@ function App() {
       const date = new Date(currentYear, currentMonth, d);
       const isToday = isCurrentMonth && d === today.getDate();
       const dayEvents = getEventsForDate(date);
+      const dayTasks = getTasksForDate(date); // Get tasks for the day
 
       days.push(
         <div
@@ -592,6 +703,11 @@ function App() {
               </div>
             ))}
             {dayEvents.length > 2 && <div className="text-xs text-purple-300 mt-1">...</div>}
+            {dayTasks.length > 0 && ( // Indicator for tasks
+              <div className="text-xs bg-yellow-500 text-white rounded-full px-1 py-0.5 mt-0.5">
+                {dayTasks.length} {dayTasks.length === 1 ? 'Aufgabe' : 'Aufgaben'}
+              </div>
+            )}
           </div>
         </div>
       );
@@ -712,6 +828,7 @@ function App() {
           {daysOfWeek.map((date, index) => {
             const dayOfWeekName = dayNamesLong[index];
             const dayEvents = getEventsForDate(date);
+            const dayTasks = getTasksForDate(date); // Get tasks for the day
             const isCurrentDay = date.getDate() === today.getDate() && date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear();
 
             return (
@@ -728,6 +845,11 @@ function App() {
                       {event.title} ({event.start.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })})
                     </div>
                   ))}
+                  {dayTasks.length > 0 && ( // Indicator for tasks
+                    <div className="text-xs bg-yellow-500 text-white rounded-full px-1 py-0.5 mt-1">
+                      {dayTasks.length} {dayTasks.length === 1 ? 'Aufgabe' : 'Aufgaben'}
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -739,6 +861,7 @@ function App() {
 
   const renderDayView = () => {
     const dayEvents = getEventsForDate(selectedCalendarDate);
+    const dayTasks = getTasksForDate(selectedCalendarDate); // Get tasks for the day
     const hours = Array.from({ length: 24 }, (_, i) => i); // 0 to 23 hours
 
     const goToPreviousDay = () => {
@@ -772,17 +895,17 @@ function App() {
             Nächster Tag
           </button>
         </div>
-        <div className="bg-gray-800 p-6 rounded-xl shadow-md overflow-hidden"> {/* Added overflow-hidden */}
+        <div className="bg-gray-800 p-6 rounded-xl shadow-md overflow-hidden">
           <h4 className="text-xl font-semibold text-gray-100 mb-4">Dein Tagesplan</h4>
-          <div className="grid grid-cols-[auto_1fr] h-[calc(100vh-350px)] overflow-y-auto"> {/* Main grid for timeline */}
-            <div className="flex flex-col border-r border-gray-700"> {/* Time labels column */}
+          <div className="grid grid-cols-[auto_1fr] h-[calc(100vh-350px)] overflow-y-auto">
+            <div className="flex flex-col border-r border-gray-700">
               {hours.map(hour => (
                 <div key={`time-${hour}`} className="h-16 flex items-start justify-end pr-2 text-gray-400 text-sm font-mono border-b border-gray-700 last:border-b-0">
                   {String(hour).padStart(2, '0')}:00
                 </div>
               ))}
             </div>
-            <div className="relative"> {/* Events column */}
+            <div className="relative">
               {hours.map(hour => (
                 <div key={`hour-slot-${hour}`} className="h-16 border-b border-gray-700 last:border-b-0"></div>
               ))}
@@ -804,7 +927,7 @@ function App() {
                       top: `${startHour * 64 + topOffset}px`,
                       height: `${height}px`,
                       zIndex: 10,
-                      marginLeft: '4px', // Small offset from the time line
+                      marginLeft: '4px',
                       marginRight: '4px'
                     }}
                   >
@@ -813,19 +936,62 @@ function App() {
                       {event.start.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} -
                       {event.end.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}
                     </p>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); deleteEvent(event.id); }}
-                      className="absolute top-1 right-1 p-0.5 text-white bg-black bg-opacity-30 rounded-full hover:bg-opacity-50"
-                      title="Ereignis löschen"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
+                    <div className="absolute top-1 right-1 flex space-x-1">
+                      <a
+                        href={createGoogleCalendarLink(event)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-0.5 text-white bg-black bg-opacity-30 rounded-full hover:bg-opacity-50"
+                        title="Zu Google Kalender hinzufügen"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                      </a>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteEvent(event.id); }}
+                        className="p-0.5 text-white bg-black bg-opacity-30 rounded-full hover:bg-opacity-50"
+                        title="Ereignis löschen"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                 );
               })}
             </div>
+          </div>
+          <div className="mt-8">
+            <h4 className="text-xl font-semibold text-gray-100 mb-4">Fällige Aufgaben für heute</h4>
+            {dayTasks.length === 0 ? (
+              <p className="text-gray-400">Keine fälligen Aufgaben für heute.</p>
+            ) : (
+              <ul className="space-y-2">
+                {dayTasks.map((task) => (
+                  <li key={task.id} className="flex items-center text-gray-200 bg-gray-700 p-2 rounded-lg">
+                    <input
+                      type="checkbox"
+                      checked={task.completed}
+                      onChange={() => toggleTaskComplete(task.id, task.completed)}
+                      className="form-checkbox h-4 w-4 text-blue-600 rounded focus:ring-blue-500 cursor-pointer bg-gray-600 border-gray-500"
+                    />
+                    <span className="ml-2 text-sm flex-grow">{task.text}</span>
+                    {task.area && <span className="ml-2 text-xs bg-blue-800 text-blue-200 px-2 py-1 rounded-full">{task.area}</span>}
+                    <button
+                      onClick={() => deleteTask(task.id)}
+                      className="ml-4 p-1 text-red-400 hover:text-red-300 rounded-full hover:bg-red-900 transition duration-200 ease-in-out"
+                      title="Aufgabe löschen"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       </>
@@ -846,95 +1012,194 @@ function App() {
   };
 
   const renderCalendarPage = () => (
-    <div className="p-6">
-      <h2 className="text-3xl font-bold text-gray-100 mb-6">Dein Kalender</h2>
-      <div className="bg-gray-800 p-6 rounded-xl shadow-lg mb-8">
-        <h3 className="text-xl font-semibold text-gray-100 mb-4">Neues Ereignis hinzufügen</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <input
-            type="text"
-            className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100 placeholder-gray-400"
-            placeholder="Titel des Ereignisses"
-            value={newEventTitle}
-            onChange={(e) => setNewEventTitle(e.target.value)}
-          />
-          <input
-            type="date"
-            className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100"
-            value={newEventDate}
-            onChange={(e) => setNewEventDate(e.target.value)}
-          />
-          <input
-            type="time"
-            className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100"
-            value={newEventStartTime}
-            onChange={(e) => setNewEventStartTime(e.target.value)}
-          />
-          <input
-            type="time"
-            className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100"
-            value={newEventEndTime}
-            onChange={(e) => setNewEventEndTime(e.target.value)}
-          />
-          <input
-            type="text"
-            className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100 placeholder-gray-400"
-            placeholder="Bereich (optional)"
-            value={newEventArea}
-            onChange={(e) => setNewEventArea(e.target.value)}
-          />
-        </div>
-        <button
-          onClick={addEvent}
-          className="px-6 py-3 bg-pink-600 text-white font-semibold rounded-lg shadow-md hover:bg-pink-700 transition duration-300 ease-in-out"
-        >
-          Ereignis hinzufügen
-        </button>
+    <div className="p-6 flex flex-col lg:flex-row gap-6 h-[calc(100vh-120px)]"> {/* Use flex for layout */}
+      {/* Left Sidebar for Tasks */}
+      <div className="lg:w-1/4 bg-gray-800 p-6 rounded-xl shadow-lg flex-shrink-0 flex flex-col">
+        <h3 className="text-xl font-semibold text-gray-100 mb-4">Deine Aufgaben</h3>
+        {!userId ? (
+          <p className="text-gray-400 mb-4">Bitte melde dich an, um deine Aufgaben zu sehen.</p>
+        ) : (
+          <>
+            <div className="flex flex-col gap-2 mb-4">
+              <input
+                type="text"
+                className="p-2 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-gray-100 placeholder-gray-400 text-sm"
+                placeholder="Neue Aufgabe..."
+                value={newTaskText}
+                onChange={(e) => setNewTaskText(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && addTask(newTaskText, newTaskArea, newTaskPriority, newTaskDueDate)}
+              />
+              <input
+                type="date"
+                className="p-2 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-gray-100 text-sm"
+                value={newTaskDueDate}
+                onChange={(e) => setNewTaskDueDate(e.target.value)}
+              />
+              <button
+                onClick={() => addTask(newTaskText, newTaskArea, newTaskPriority, newTaskDueDate)}
+                className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out text-sm"
+              >
+                Aufgabe hinzufügen
+              </button>
+            </div>
+            <div className="flex-grow overflow-y-auto custom-scrollbar pr-2">
+              {tasks.filter(task => !task.completed).length === 0 ? (
+                <p className="text-gray-400 text-center py-4">Keine offenen Aufgaben.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {tasks.filter(task => !task.completed).map((task) => (
+                    <li key={task.id} className="flex items-center bg-gray-700 p-2 rounded-lg shadow-sm">
+                      <input
+                        type="checkbox"
+                        checked={task.completed}
+                        onChange={() => toggleTaskComplete(task.id, task.completed)}
+                        className="form-checkbox h-4 w-4 text-blue-600 rounded focus:ring-blue-500 cursor-pointer bg-gray-600 border-gray-500"
+                      />
+                      <span className="ml-2 text-sm flex-grow text-gray-100">{task.text}</span>
+                      {task.dueDate && (
+                        <span className="ml-2 text-xs bg-gray-600 text-gray-200 px-2 py-1 rounded-full">
+                          {task.dueDate.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => deleteTask(task.id)}
+                        className="ml-2 p-1 text-red-400 hover:text-red-300 rounded-full hover:bg-red-900 transition duration-200 ease-in-out"
+                        title="Aufgabe löschen"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <button
+              onClick={() => setCurrentView('tasks')}
+              className="mt-4 px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out text-sm w-full"
+            >
+              Alle Aufgaben verwalten
+            </button>
+          </>
+        )}
       </div>
 
-      <div className="bg-gray-800 p-6 rounded-xl shadow-lg">
-        <div className="flex justify-center space-x-4 mb-6">
+      {/* Main Calendar Content */}
+      <div className="lg:flex-grow flex flex-col">
+        <h2 className="text-3xl font-bold text-gray-100 mb-6">Dein Kalender</h2>
+        <div className="bg-gray-800 p-6 rounded-xl shadow-lg mb-8">
+          <h3 className="text-xl font-semibold text-gray-100 mb-4">Neues Ereignis hinzufügen</h3>
+          {!userId && <p className="text-red-400 mb-4">Bitte melde dich an, um Ereignisse hinzuzufügen.</p>}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <input
+              type="text"
+              className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100 placeholder-gray-400"
+              placeholder="Titel des Ereignisses"
+              value={newEventTitle}
+              onChange={(e) => setNewEventTitle(e.target.value)}
+              disabled={!userId}
+            />
+            <input
+              type="date"
+              className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100"
+              value={newEventDate}
+              onChange={(e) => setNewEventDate(e.target.value)}
+              disabled={!userId}
+            />
+            <input
+              type="time"
+              className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100"
+              value={newEventStartTime}
+              onChange={(e) => setNewEventStartTime(e.target.value)}
+              disabled={!userId}
+            />
+            <input
+              type="time"
+              className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100"
+              value={newEventEndTime}
+              onChange={(e) => setNewEventEndTime(e.target.value)}
+              disabled={!userId}
+            />
+            <input
+              type="text"
+              className="p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 bg-gray-900 text-gray-100 placeholder-gray-400"
+              placeholder="Bereich (optional)"
+              value={newEventArea}
+              onChange={(e) => setNewEventArea(e.target.value)}
+              disabled={!userId}
+            />
+          </div>
           <button
-            onClick={() => setCalendarView('month')}
-            className={`px-4 py-2 rounded-lg font-medium ${calendarView === 'month' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-700'}`}
+            onClick={addEvent}
+            className="px-6 py-3 bg-pink-600 text-white font-semibold rounded-lg shadow-md hover:bg-pink-700 transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!userId}
           >
-            Monat
-          </button>
-          <button
-            onClick={() => setCalendarView('week')}
-            className={`px-4 py-2 rounded-lg font-medium ${calendarView === 'week' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-700'}`}
-          >
-            Woche
-          </button>
-          <button
-            onClick={() => setCalendarView('day')}
-            className={`px-4 py-2 rounded-lg font-medium ${calendarView === 'day' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-700'}`}
-          >
-            Tag
+            Ereignis hinzufügen
           </button>
         </div>
-        {renderCalendarContent()}
+
+        <div className="bg-gray-800 p-6 rounded-xl shadow-lg flex-grow">
+          <div className="flex justify-between items-center mb-6 flex-wrap gap-2">
+            <h3 className="text-xl font-semibold text-gray-100">Kalenderansicht</h3>
+            <div className="flex space-x-2">
+              <button
+                onClick={() => {
+                  setSelectedCalendarDate(new Date()); // Jump to today
+                  setCalendarView('day'); // Set to day view as default for 'Today'
+                }}
+                className="px-4 py-2 rounded-lg font-medium bg-blue-600 text-white shadow-md hover:bg-blue-700 transition duration-300 ease-in-out"
+              >
+                Heute
+              </button>
+              <button
+                onClick={() => setCalendarView('month')}
+                className={`px-4 py-2 rounded-lg font-medium ${calendarView === 'month' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-700'}`}
+              >
+                Monat
+              </button>
+              <button
+                onClick={() => setCalendarView('week')}
+                className={`px-4 py-2 rounded-lg font-medium ${calendarView === 'week' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-700'}`}
+              >
+                Woche
+              </button>
+              <button
+                onClick={() => setCalendarView('day')}
+                className={`px-4 py-2 rounded-lg font-medium ${calendarView === 'day' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-700'}`}
+              >
+                Tag
+              </button>
+            </div>
+          </div>
+          {renderCalendarContent()}
+        </div>
+        <p className="text-sm text-gray-400 mt-6">
+          <span className="inline-block w-3 h-3 rounded-full bg-blue-700 mr-2"></span>
+          Heutiger Tag
+        </p>
+        <p className="text-sm text-gray-400 mt-2">
+          <span className="inline-block w-3 h-3 rounded-full bg-purple-600 mr-2"></span>
+          Eigene Ereignisse (Beispiel Farbe)
+        </p>
       </div>
-      <p className="text-sm text-gray-400 mt-6">
-        <span className="inline-block w-3 h-3 rounded-full bg-blue-700 mr-2"></span>
-        Heutiger Tag
-      </p>
-      <p className="text-sm text-gray-400 mt-2">
-        <span className="inline-block w-3 h-3 rounded-full bg-purple-600 mr-2"></span>
-        Eigene Ereignisse (Beispiel Farbe)
-      </p>
     </div>
   );
 
   const renderDashboard = () => {
-    // Schulzeiten sind entfernt, daher ist todaySchedule nicht mehr relevant
-    // const today = new Date();
-    // const dayOfWeek = getDayName(today);
-    // const todaySchedule = schoolSchedule[dayOfWeek];
+    const today = new Date();
+    const todayEvents = getEventsForDate(today);
+    const topPriorityTasks = tasks.filter(task => !task.completed)
+                                  .sort((a, b) => {
+                                      const priorityOrder = { 'high': 3, 'medium': 2, 'low': 1, '': 0, undefined: 0 };
+                                      return priorityOrder[b.priority] - priorityOrder[a.priority];
+                                  })
+                                  .slice(0, 3); // Top 3 tasks
+    const recentNotes = notes.slice(0, 3); // 3 most recent notes
 
     return (
       <div className="p-6">
-        <h2 className="text-3xl font-bold text-gray-100 mb-6">Willkommen in deiner Lebens-Organisator App!</h2>
+        <h2 className="text-3xl font-bold text-gray-100 mb-6">Willkommen in deiner Chronos App!</h2>
         <p className="text-lg text-gray-300 mb-8">
           Hier kannst du dein Leben in allen Facetten einfach und umfangreich organisieren.
         </p>
@@ -950,12 +1215,12 @@ function App() {
               value={aiCommandText}
               onChange={(e) => setAiCommandText(e.target.value)}
               onKeyPress={(e) => e.key === 'Enter' && handleAICommand()}
-              disabled={aiLoading}
+              disabled={aiLoading || !userId}
             />
             <button
               onClick={handleAICommand}
               className="px-6 py-3 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={aiLoading}
+              disabled={aiLoading || !userId}
             >
               {aiLoading ? 'Verarbeite...' : 'KI-Befehl senden'}
             </button>
@@ -965,6 +1230,7 @@ function App() {
               {aiMessage}
             </p>
           )}
+          {!userId && <p className="text-sm text-red-400 mt-2">Bitte melde dich an, um den KI-Assistenten zu nutzen.</p>}
           <p className="text-sm text-gray-400 mt-2">
             Beispiele: "Füge Aufgabe hinzu: E-Mails beantworten, Bereich: Arbeit, Priorität: hoch", "Notiere: Meeting-Protokoll vom 05.07., Inhalt: Wichtige Entscheidungen", "Notiz: Einkaufsliste, Inhalt: Milch, Brot, Eier"
           </p>
@@ -982,6 +1248,7 @@ function App() {
               value={quickAddText}
               onChange={(e) => setQuickAddText(e.target.value)}
               onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
+              disabled={!userId}
             />
             <input
               type="text"
@@ -990,15 +1257,18 @@ function App() {
               value={quickAddArea}
               onChange={(e) => setQuickAddArea(e.target.value)}
               onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
+              disabled={!userId}
             />
             <button
               onClick={handleQuickAdd}
-              className="px-6 py-3 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition duration-300 ease-in-out"
+              className="px-6 py-3 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={!userId}
             >
               Hinzufügen
             </button>
           </div>
-          <p className="text-sm text-gray-400">
+          {!userId && <p className="text-sm text-red-400 mt-2">Bitte melde dich an, um die Schnellerfassung zu nutzen.</p>}
+          <p className="text-sm text-gray-400 mt-2">
             Tipp: Beginne mit "Notiz:" oder "Memo:" für eine Notiz. Alles andere wird als Aufgabe hinzugefügt (Standardpriorität: Mittel).
           </p>
         </div>
@@ -1006,31 +1276,41 @@ function App() {
         {/* Dein Fokus für heute */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
           <div className="bg-gray-800 p-6 rounded-xl shadow-md">
-            <h3 className="text-xl font-semibold text-gray-100 mb-4">Dein Tagesüberblick</h3>
-            <p className="text-gray-400 text-lg font-medium">
-              Gehe zum Kalender für deine detaillierte Zeitplanung.
-            </p>
-            <p className="text-sm text-gray-400 mt-2">
-              (Deine festen Schulzeiten werden jetzt direkt im Kalender verwaltet.)
-            </p>
+            <h3 className="text-xl font-semibold text-gray-100 mb-4">Heute anstehende Ereignisse</h3>
+            {todayEvents.length === 0 ? (
+              <p className="text-gray-400">Keine Ereignisse für heute.</p>
+            ) : (
+              <ul className="space-y-2">
+                {todayEvents.map((event, index) => (
+                  <li key={event.id} className={`flex items-center text-gray-200 ${getEventColor(index)} p-2 rounded-lg`}>
+                    <span className="font-semibold text-sm mr-2">{event.start.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span>
+                    <span className="text-sm flex-grow">{event.title}</span>
+                    {event.area && <span className="ml-2 text-xs bg-opacity-70 px-2 py-1 rounded-full">{event.area}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button
+              onClick={() => { setSelectedCalendarDate(new Date()); setCurrentView('calendar'); setCalendarView('day'); }}
+              className="mt-4 px-4 py-2 bg-pink-600 text-white font-semibold rounded-lg shadow-md hover:bg-pink-700 transition duration-300 ease-in-out text-sm"
+            >
+              Zum heutigen Tagesplan
+            </button>
           </div>
 
           <div className="bg-gray-800 p-6 rounded-xl shadow-md">
-            <h3 className="text-xl font-semibold text-gray-100 mb-4">Deine dringenden Aufgaben</h3>
-            {tasks.filter(task => !task.completed).length === 0 ? (
-              <p className="text-gray-400">Keine offenen Aufgaben. Gut gemacht!</p>
+            <h3 className="text-xl font-semibold text-gray-100 mb-4">Deine Top-Prioritätsaufgaben</h3>
+            {topPriorityTasks.length === 0 ? (
+              <p className="text-gray-400">Keine dringenden Aufgaben. Gut gemacht!</p>
             ) : (
               <ul className="space-y-2">
-                {tasks.filter(task => !task.completed).slice(0, 5).map((task) => ( // Zeige max. 5 Aufgaben
+                {topPriorityTasks.map((task) => (
                   <li key={task.id} className="flex items-center text-gray-200">
                     <span className={`inline-block w-3 h-3 rounded-full mr-2 ${getPriorityColor(task.priority)}`}></span>
                     <span className="ml-2">{task.text}</span>
                     {task.area && <span className="ml-2 text-xs bg-blue-800 text-blue-200 px-2 py-1 rounded-full">{task.area}</span>}
                   </li>
                 ))}
-                {tasks.filter(task => !task.completed).length > 5 && (
-                  <li className="text-gray-400 text-sm mt-2">... und {tasks.filter(task => !task.completed).length - 5} weitere Aufgaben.</li>
-                )}
               </ul>
             )}
             <button
@@ -1044,11 +1324,11 @@ function App() {
 
         <div className="bg-gray-800 p-6 rounded-xl shadow-md mb-8">
           <h3 className="text-xl font-semibold text-gray-100 mb-4">Neueste Notizen</h3>
-          {notes.length === 0 ? (
+          {recentNotes.length === 0 ? (
             <p className="text-gray-400">Noch keine Notizen vorhanden.</p>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {notes.slice(0, 3).map((note) => ( // Zeige max. 3 Notizen
+              {recentNotes.map((note) => (
                 <div key={note.id} className="p-4 bg-gray-700 rounded-lg shadow-sm cursor-pointer hover:bg-gray-600 transition" onClick={() => handleNoteClick(note)}>
                   <p className="font-medium truncate text-gray-100">{note.title}</p>
                   <p className="text-sm text-gray-300 line-clamp-1">{note.content}</p>
@@ -1114,6 +1394,7 @@ function App() {
   const renderTasks = () => (
     <div className="p-6">
       <h2 className="text-3xl font-bold text-gray-100 mb-6">Deine Aufgaben</h2>
+      {!userId && <p className="text-red-400 mb-4">Bitte melde dich an, um deine Aufgaben zu verwalten.</p>}
       <div className="flex flex-col sm:flex-row mb-6 space-y-3 sm:space-y-0 sm:space-x-3">
         <input
           type="text"
@@ -1121,7 +1402,8 @@ function App() {
           placeholder="Neue Aufgabe hinzufügen..."
           value={newTaskText}
           onChange={(e) => setNewTaskText(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && addTask(newTaskText, newTaskArea, newTaskPriority)}
+          onKeyPress={(e) => e.key === 'Enter' && addTask(newTaskText, newTaskArea, newTaskPriority, newTaskDueDate)}
+          disabled={!userId}
         />
         <input
           type="text"
@@ -1129,26 +1411,38 @@ function App() {
           placeholder="Bereich (optional)"
           value={newTaskArea}
           onChange={(e) => setNewTaskArea(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && addTask(newTaskText, newTaskArea, newTaskPriority)}
+          onKeyPress={(e) => e.key === 'Enter' && addTask(newTaskText, newTaskArea, newTaskPriority, newTaskDueDate)}
+          disabled={!userId}
         />
         <select
           className="w-full sm:w-32 p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-gray-100"
           value={newTaskPriority}
           onChange={(e) => setNewTaskPriority(e.target.value)}
+          disabled={!userId}
         >
           <option value="low">Niedrig</option>
           <option value="medium">Mittel</option>
           <option value="high">Hoch</option>
         </select>
+        <input
+          type="date"
+          className="w-full sm:w-40 p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-gray-100"
+          value={newTaskDueDate}
+          onChange={(e) => setNewTaskDueDate(e.target.value)}
+          disabled={!userId}
+        />
         <button
-          onClick={() => addTask(newTaskText, newTaskArea, newTaskPriority)}
-          className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out"
+          onClick={() => addTask(newTaskText, newTaskArea, newTaskPriority, newTaskDueDate)}
+          className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={!userId}
         >
           Hinzufügen
         </button>
       </div>
-      {tasks.length === 0 ? (
+      {tasks.length === 0 && userId ? (
         <p className="text-gray-400 text-center py-10">Noch keine Aufgaben. Füge eine neue Aufgabe hinzu!</p>
+      ) : tasks.length === 0 && !userId ? (
+        <p className="text-gray-400 text-center py-10">Melde dich an, um deine Aufgaben zu sehen.</p>
       ) : (
         <ul className="space-y-3">
           {tasks.map((task) => (
@@ -1168,6 +1462,11 @@ function App() {
                 {task.text}
               </span>
               {task.area && <span className="ml-2 text-sm bg-blue-800 text-blue-200 px-2 py-1 rounded-full">{task.area}</span>}
+              {task.dueDate && (
+                <span className="ml-2 text-sm bg-gray-600 text-gray-200 px-2 py-1 rounded-full">
+                  Fällig: {task.dueDate.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })}
+                </span>
+              )}
               <select
                 className={`ml-2 p-1 rounded-lg text-sm font-semibold ${getPriorityColor(task.priority)} bg-gray-700 text-gray-100`}
                 value={task.priority || 'medium'}
@@ -1196,6 +1495,7 @@ function App() {
   const renderNotes = () => (
     <div className="p-6">
       <h2 className="text-3xl font-bold text-gray-100 mb-6">Deine Notizen</h2>
+      {!userId && <p className="text-red-400 mb-4">Bitte melde dich an, um deine Notizen zu verwalten.</p>}
       <div className="mb-6 bg-gray-800 p-6 rounded-xl shadow-md">
         <h3 className="text-xl font-semibold text-gray-100 mb-4">Neue Notiz erstellen</h3>
         <input
@@ -1204,12 +1504,14 @@ function App() {
           placeholder="Titel der Notiz"
           value={newNoteTitle}
           onChange={(e) => setNewNoteTitle(e.target.value)}
+          disabled={!userId}
         />
         <textarea
           className="w-full p-3 border border-gray-700 rounded-lg mb-3 h-32 resize-y focus:outline-none focus:ring-2 focus:ring-green-500 bg-gray-900 text-gray-100 placeholder-gray-400"
           placeholder="Inhalt der Notiz..."
           value={newNoteContent}
           onChange={(e) => setNewNoteContent(e.target.value)}
+          disabled={!userId}
         ></textarea>
         <input
           type="text"
@@ -1217,17 +1519,21 @@ function App() {
           placeholder="Bereich (optional)"
           value={newNoteArea}
           onChange={(e) => setNewNoteArea(e.target.value)}
+          disabled={!userId}
         />
         <button
           onClick={() => addNote(newNoteTitle, newNoteContent, newNoteArea)}
-          className="px-6 py-3 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 transition duration-300 ease-in-out"
+          className="px-6 py-3 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={!userId}
         >
           Notiz hinzufügen
         </button>
       </div>
 
-      {notes.length === 0 ? (
+      {notes.length === 0 && userId ? (
         <p className="text-gray-400 text-center py-10">Noch keine Notizen. Erstelle eine neue Notiz!</p>
+      ) : notes.length === 0 && !userId ? (
+        <p className="text-gray-400 text-center py-10">Melde dich an, um deine Notizen zu sehen.</p>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {notes.map((note) => (
@@ -1277,6 +1583,50 @@ function App() {
     </div>
   );
 
+  const renderAuthForm = () => (
+    <div className="flex items-center justify-center min-h-[calc(100vh-100px)] p-4">
+      <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-md">
+        <h2 className="text-3xl font-bold text-gray-100 mb-6 text-center">
+          {isLoginMode ? 'Anmelden bei Chronos' : 'Registrieren bei Chronos'}
+        </h2>
+        {authError && <p className="text-red-400 text-center mb-4">{authError}</p>}
+        <div className="space-y-4">
+          <input
+            type="email"
+            className="w-full p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-gray-100 placeholder-gray-400"
+            placeholder="E-Mail-Adresse"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={authLoading}
+          />
+          <input
+            type="password"
+            className="w-full p-3 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-gray-100 placeholder-gray-400"
+            placeholder="Passwort"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={authLoading}
+          />
+          <button
+            onClick={handleAuthAction}
+            className="w-full px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={authLoading}
+          >
+            {authLoading ? 'Lade...' : (isLoginMode ? 'Anmelden' : 'Registrieren')}
+          </button>
+        </div>
+        <button
+          onClick={() => setIsLoginMode(!isLoginMode)}
+          className="w-full mt-4 text-blue-400 hover:text-blue-300 text-sm"
+          disabled={authLoading}
+        >
+          {isLoginMode ? 'Noch kein Konto? Registrieren' : 'Bereits ein Konto? Anmelden'}
+        </button>
+      </div>
+    </div>
+  );
+
+
   return (
     <div className="min-h-screen bg-gray-900 font-sans text-gray-100">
       <style>
@@ -1297,13 +1647,27 @@ function App() {
             -webkit-box-orient: vertical;
             overflow: hidden;
           }
+          .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-track {
+            background: #2d3748; /* gray-800 */
+            border-radius: 10px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #4a5568; /* gray-600 */
+            border-radius: 10px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #6b7280; /* gray-500 */
+          }
         `}
       </style>
       <script src="https://cdn.tailwindcss.com"></script>
 
       <nav className="bg-gray-800 shadow-lg p-4 sticky top-0 z-40">
         <div className="container mx-auto flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-blue-500">Lebens-Organisator</h1>
+          <h1 className="text-2xl font-bold text-blue-500">Chronos</h1>
           <div className="flex space-x-4">
             <button
               onClick={() => setCurrentView('dashboard')}
@@ -1329,6 +1693,21 @@ function App() {
             >
               Kalender
             </button>
+            {userId ? (
+              <button
+                onClick={handleLogout}
+                className="px-4 py-2 rounded-lg font-medium text-red-400 hover:bg-gray-700"
+              >
+                Abmelden
+              </button>
+            ) : (
+              <button
+                onClick={() => { setCurrentView('dashboard'); setIsLoginMode(true); }} // Go to dashboard and show login
+                className="px-4 py-2 rounded-lg font-medium text-blue-400 hover:bg-gray-700"
+              >
+                Anmelden
+              </button>
+            )}
           </div>
         </div>
       </nav>
@@ -1339,12 +1718,16 @@ function App() {
             <p className="text-xl text-gray-300">Lade App-Daten...</p>
           </div>
         ) : (
-          <>
-            {currentView === 'dashboard' && renderDashboard()}
-            {currentView === 'tasks' && renderTasks()}
-            {currentView === 'notes' && renderNotes()}
-            {currentView === 'calendar' && renderCalendarPage()}
-          </>
+          userId ? (
+            <>
+              {currentView === 'dashboard' && renderDashboard()}
+              {currentView === 'tasks' && renderTasks()}
+              {currentView === 'notes' && renderNotes()}
+              {currentView === 'calendar' && renderCalendarPage()}
+            </>
+          ) : (
+            renderAuthForm()
+          )
         )}
       </main>
     </div>
